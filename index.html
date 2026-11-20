@@ -11,18 +11,40 @@
       --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
-    body { background: var(--bg); color: var(--text); display: flex; height: 100dvh; overflow: hidden; }
+    body { background: var(--bg); color: var(--text); display: flex; height: 100dvh; width: 100vw; overflow: hidden; }
     #sidebar {
-      width: 380px; background: var(--panel); border-right: 1px solid var(--border);
-      padding: 18px; display: flex; flex-direction: column; gap: 12px; z-index: 10; overflow-y: auto;
+      width: 380px;
+      min-width: 150px;
+      max-width: 80vw;
+      flex-shrink: 0;
+      background: var(--panel);
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      z-index: 10;
+      overflow-y: auto;
     }
-    h1 { font-size: 1.05rem; letter-spacing: 0.04em; color: var(--accent); display: flex; justify-content: space-between; align-items: center; }
+    #resizer {
+      width: 6px;
+      background: var(--border);
+      cursor: col-resize;
+      flex-shrink: 0;
+      z-index: 20;
+      transition: background 0.15s;
+      touch-action: none;
+    }
+    #resizer:hover, #resizer.dragging {
+      background: var(--accent);
+    }
+    h1 { font-size: 1.25rem; letter-spacing: 0.04em; color: var(--accent); display: flex; justify-content: space-between; align-items: center; gap: 8px; }
     label { font-size: 0.78rem; color: var(--muted); display: block; margin-bottom: 4px; }
     input, textarea {
       width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
       border-radius: 6px; padding: 9px 10px; font-size: 16px;
     }
     textarea { resize: vertical; min-height: 70px; }
+    #thought { min-height: 140px; }
     button {
       background: var(--accent); color: #0d1117; font-weight: 600; border: none;
       border-radius: 6px; padding: 11px; cursor: pointer; font-size: 0.95rem;
@@ -31,16 +53,29 @@
     #inspector { margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 0.88rem; line-height: 1.5; }
     .tag { display: inline-block; background: #21262d; color: var(--accent); padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; margin: 4px 4px 0 0; }
     blockquote { border-left: 3px solid var(--border); padding-left: 10px; color: var(--muted); margin: 8px 0; font-style: italic; }
-    #canvas-wrap { flex: 1; position: relative; }
+    #canvas-wrap { flex: 1; min-width: 0; min-height: 0; position: relative; }
     #legend {
       position: absolute; bottom: 14px; right: 14px; background: rgba(22,27,34,0.9);
       border: 1px solid var(--border); padding: 8px 12px; border-radius: 8px; font-size: 0.75rem; pointer-events: none;
     }
     .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+
     @media (max-width: 768px) {
       body { flex-direction: column; }
-      #sidebar { width: 100%; max-height: 52dvh; border-right: none; border-bottom: 1px solid var(--border); }
-      #canvas-wrap { height: 48dvh; }
+      #sidebar {
+        width: 100% !important;
+        min-width: 100% !important;
+        max-width: 100% !important;
+        height: 56dvh;
+        min-height: 150px;
+        max-height: 85dvh;
+      }
+      #resizer {
+        width: 100%;
+        height: 8px;
+        cursor: row-resize;
+      }
+      #canvas-wrap { flex: 1; width: 100%; }
     }
   </style>
 </head>
@@ -48,7 +83,7 @@
   <div id="sidebar">
     <h1>
       <span>ZETTELKASTEN AGENT</span>
-      <button style="padding:4px 8px;font-size:0.72rem;background:#21262d;color:var(--muted);" onclick="resetPasscode()">Key</button>
+      <button style="padding:4px 8px;font-size:0.82rem;background:#21262d;color:var(--muted);" onclick="resetPasscode()">Key</button>
     </h1>
     <div>
       <label>Book / Source & Page</label>
@@ -68,6 +103,8 @@
     </div>
   </div>
 
+  <div id="resizer" title="Drag to resize sidebar"></div>
+
   <div id="canvas-wrap">
     <div id="graph"></div>
     <div id="legend">
@@ -80,6 +117,8 @@
 
   <script>
     const REL_COLORS = { supports: "#3fb950", extends: "#58a6ff", contradicts: "#f85149", analogous_to: "#d2a8ff" };
+    const sidebar = document.getElementById("sidebar");
+    const resizer = document.getElementById("resizer");
     const wrap = document.getElementById("canvas-wrap");
 
     function getPasscode() {
@@ -129,7 +168,49 @@
         `;
       });
 
-    window.addEventListener("resize", () => Graph.width(wrap.clientWidth).height(wrap.clientHeight));
+    function syncCanvasSize() {
+      Graph.width(wrap.clientWidth).height(wrap.clientHeight);
+    }
+
+    window.addEventListener("resize", syncCanvasSize);
+
+    // --- Draggable Sidebar Resizer (Desktop & Mobile Touch/Pointer) ---
+    let isDragging = false;
+
+    resizer.addEventListener("pointerdown", (e) => {
+      isDragging = true;
+      resizer.classList.add("dragging");
+      resizer.setPointerCapture(e.pointerId);
+      document.body.style.userSelect = "none";
+    });
+
+    resizer.addEventListener("pointermove", (e) => {
+      if (!isDragging) return;
+      const isMobile = window.innerWidth <= 768;
+
+      if (isMobile) {
+        sidebar.style.minHeight = "100px";
+        const newHeight = Math.min(Math.max(100, e.clientY), window.innerHeight - 120);
+        sidebar.style.height = `${newHeight}px`;
+      } else {
+        sidebar.style.minWidth = "100px";
+        const newWidth = Math.min(Math.max(100, e.clientX), window.innerWidth - 150);
+        sidebar.style.width = `${newWidth}px`;
+      }
+      syncCanvasSize();
+    });
+
+    function stopDragging(e) {
+      if (!isDragging) return;
+      isDragging = false;
+      resizer.classList.remove("dragging");
+      document.body.style.userSelect = "";
+      if (e && e.pointerId) resizer.releasePointerCapture(e.pointerId);
+      syncCanvasSize();
+    }
+
+    resizer.addEventListener("pointerup", stopDragging);
+    resizer.addEventListener("pointercancel", stopDragging);
 
     async function refreshGraph() {
       const res = await fetch("/api/graph", { headers: { "x-passcode": getPasscode() } });
@@ -162,15 +243,4 @@
         document.getElementById("quote").value = "";
         document.getElementById("thought").value = "";
         await refreshGraph();
-      } catch (err) {
-        alert(err.message);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "Synthesize & Map Note";
-      }
-    }
-
-    refreshGraph();
-  </script>
-</body>
-</html>
+      } catch (err)
