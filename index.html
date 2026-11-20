@@ -239,8 +239,15 @@
             thought
           })
         });
-        if (!res.ok) throw new Error("Failed to save note");
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Failed to save note");
         document.getElementById("quote").value = "";
         document.getElementById("thought").value = "";
         await refreshGraph();
-      } catch (err)
+      } catch (err) {
+        alert("Error: " + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Synthesize & Map Note";
+      }
+    }
