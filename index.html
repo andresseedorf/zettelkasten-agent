@@ -37,7 +37,7 @@
     #resizer:hover, #resizer.dragging {
       background: var(--accent);
     }
-    h1 { font-size: 1.25rem; letter-spacing: 0.04em; color: var(--accent); display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    h1 { font-size: 1.05rem; letter-spacing: 0.04em; color: var(--accent); display: flex; justify-content: space-between; align-items: center; gap: 8px; }
     label { font-size: 0.78rem; color: var(--muted); display: block; margin-bottom: 4px; }
     input, textarea {
       width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
@@ -83,7 +83,7 @@
   <div id="sidebar">
     <h1>
       <span>ZETTELKASTEN AGENT</span>
-      <button style="padding:4px 8px;font-size:0.82rem;background:#21262d;color:var(--muted);" onclick="resetPasscode()">Key</button>
+      <button id="keyBtn" type="button" style="padding:4px 8px;font-size:0.72rem;background:#21262d;color:var(--muted);">Key</button>
     </h1>
     <div>
       <label>Book / Source & Page</label>
@@ -97,7 +97,7 @@
       <label>Your Thought / Synthesis *</label>
       <textarea id="thought" placeholder="What is the core atomic idea?"></textarea>
     </div>
-    <button id="submitBtn" onclick="submitNote()">Synthesize & Map Note</button>
+    <button id="submitBtn" type="button">Synthesize & Map Note</button>
     <div id="inspector">
       <div style="color: var(--muted)">Tap any node on the canvas to inspect its permanent note and quote.</div>
     </div>
@@ -116,10 +116,18 @@
   </div>
 
   <script>
-    const REL_COLORS = { supports: "#3fb950", extends: "#58a6ff", contradicts: "#f85149", analogous_to: "#d2a8ff" };
+    const REL_COLORS = {
+      supports: "#3fb950",
+      extends: "#58a6ff",
+      contradicts: "#f85149",
+      analogous_to: "#d2a8ff"
+    };
+
     const sidebar = document.getElementById("sidebar");
     const resizer = document.getElementById("resizer");
     const wrap = document.getElementById("canvas-wrap");
+    const submitBtn = document.getElementById("submitBtn");
+    const keyBtn = document.getElementById("keyBtn");
 
     function getPasscode() {
       let code = localStorage.getItem("zk_passcode");
@@ -128,11 +136,6 @@
         localStorage.setItem("zk_passcode", code);
       }
       return code;
-    }
-
-    function resetPasscode() {
-      localStorage.removeItem("zk_passcode");
-      refreshGraph();
     }
 
     const Graph = ForceGraph()(document.getElementById("graph"))
@@ -174,7 +177,6 @@
 
     window.addEventListener("resize", syncCanvasSize);
 
-    // --- Draggable Sidebar Resizer (Desktop & Mobile Touch/Pointer) ---
     let isDragging = false;
 
     resizer.addEventListener("pointerdown", (e) => {
@@ -219,35 +221,55 @@
         localStorage.removeItem("zk_passcode");
         return;
       }
-      Graph.graphData(await res.json());
+      const data = await res.json();
+      Graph.graphData(data);
     }
 
     async function submitNote() {
       const thought = document.getElementById("thought").value.trim();
-      if (!thought) return alert("Please enter your thought or synthesis.");
-      const btn = document.getElementById("submitBtn");
-      btn.disabled = true;
-      btn.textContent = "Agent analyzing & saving to Drive...";
+      if (!thought) {
+        alert("Please enter your thought or synthesis.");
+        return;
+      }
+      submitBtn.disabled = true;
+      submitBtn.textContent = "Agent analyzing & saving to Drive...";
 
       try {
         const res = await fetch("/api/notes", {
           method: "POST",
-          headers: { "Content-Type": "application/json", "x-passcode": getPasscode() },
+          headers: {
+            "Content-Type": "application/json",
+            "x-passcode": getPasscode()
+          },
           body: JSON.stringify({
             source: document.getElementById("source").value.trim() || "Unattributed",
             quote: document.getElementById("quote").value.trim(),
-            thought
+            thought: thought
           })
         });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || "Failed to save note");
+        if (!res.ok) {
+          throw new Error(data.detail || "Failed to save note");
+        }
         document.getElementById("quote").value = "";
         document.getElementById("thought").value = "";
         await refreshGraph();
       } catch (err) {
         alert("Error: " + err.message);
       } finally {
-        btn.disabled = false;
-        btn.textContent = "Synthesize & Map Note";
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Synthesize & Map Note";
       }
     }
+
+    keyBtn.addEventListener("click", () => {
+      localStorage.removeItem("zk_passcode");
+      refreshGraph();
+    });
+
+    submitBtn.addEventListener("click", submitNote);
+
+    refreshGraph();
+  </script>
+</body>
+</html>
