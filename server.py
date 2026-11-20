@@ -32,7 +32,10 @@ def get_clients():
     if not raw_sa:
         raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_JSON in Vercel Environment Variables.")
 
-    creds_info = json.loads(raw_sa)
+    creds_info = json.loads(raw_sa, strict=False)
+    if "private_key" in creds_info:
+        creds_info["private_key"] = creds_info["private_key"].replace("\\n", "\n")
+
     creds = service_account.Credentials.from_service_account_info(
         creds_info, scopes=["https://www.googleapis.com/auth/drive"]
     )
@@ -87,7 +90,8 @@ def load_graph(drive, folder_id: str) -> dict:
     done = False
     while not done:
         _, done = downloader.next_chunk()
-    return json.loads(buf.getvalue().decode("utf-8"))
+    content = buf.getvalue().decode("utf-8").strip()
+    return json.loads(content) if content else {"nodes": [], "links": []}
 
 
 def upload_text_to_drive(drive, folder_id: str, filename: str, content: str, mime_type: str):
@@ -113,7 +117,6 @@ def serve_ui():
 
 @app.get("/api/health")
 def health_check():
-    """Visit /api/health in your browser to verify env vars and Drive folder access."""
     try:
         _, drive, folder_id, sa_email = get_clients()
         folder = drive.files().get(fileId=folder_id, fields="id, name, capabilities").execute()
@@ -209,15 +212,18 @@ CANDIDATE EXISTING NOTES:
 
         upload_text_to_drive(drive, folder_id, "graph.json", json.dumps(graph, indent=2), "application/json")
 
-        id_to_title = {n["id"]: n["title"] for n in graph["nodes"]}
-        slug = "".join(c if c.isalnum() or c in " -_" else "" for c in new_node["title"]).strip().replace(" ", "_")
-        filename = f"{new_node['id']}_{slug}.md"
-        tag_line = " ".join(f"#{t}" for t in new_node["tags"])
-        link_lines = [
-            f"- **{lk['relation']}** [[{id_to_title.get(lk['target'], lk['target'])}]]: {lk['reason']}"
-            for lk in new_links
-        ]
-        md = f"""# {new_node['title']}
+        # Best-effort Markdown export (won't block canvas if service account lacks file-creation quota)
+        md_warning = None
+        try:
+            id_to_title = {n["id"]: n["title"] for n in graph["nodes"]}
+            slug = "".join(c if c.isalnum() or c in " -_" else "" for c in new_node["title"]).strip().replace(" ", "_")
+            filename = f"{new_node['id']}_{slug}.md"
+            tag_line = " ".join(f"#{t}" for t in new_node["tags"])
+            link_lines = [
+                f"- **{lk['relation']}** [[{id_to_title.get(lk['target'], lk['target'])}]]: {lk['reason']}"
+                for lk in new_links
+            ]
+            md = f"""# {new_node['title']}
 **ID:** `{new_node['id']}` | **Created:** {new_node['created']} | **Tags:** {tag_line}
 
 ## Permanent Note
@@ -230,9 +236,16 @@ CANDIDATE EXISTING NOTES:
 ## Connections
 {chr(10).join(link_lines) if link_lines else "_No links yet._"}
 """
-        upload_text_to_drive(drive, folder_id, filename, md, "text/markdown")
+            upload_text_to_drive(drive, folder_id, filename, md, "text/markdown")
+        except Exception as md_err:
+            md_warning = str(md_err)
 
-        return {"status": "ok", "node": {k: v for k, v in new_node.items() if k != "embedding"}, "links": new_links}
+        return {
+            "status": "ok",
+            "node": {k: v for k, v in new_node.items() if k != "embedding"},
+            "links": new_links,
+            "md_warning": md_warning,
+        }
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
