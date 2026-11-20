@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Zettelkasten Canvas</title>
+  <script src="https://unpkg.com/force-graph"></script>
+  <style>
+    :root {
+      --bg: #0d1117; --panel: #161b22; --border: #30363d;
+      --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+    body { background: var(--bg); color: var(--text); display: flex; height: 100dvh; overflow: hidden; }
+    #sidebar {
+      width: 380px; background: var(--panel); border-right: 1px solid var(--border);
+      padding: 18px; display: flex; flex-direction: column; gap: 12px; z-index: 10; overflow-y: auto;
+    }
+    h1 { font-size: 1.05rem; letter-spacing: 0.04em; color: var(--accent); display: flex; justify-content: space-between; align-items: center; }
+    label { font-size: 0.78rem; color: var(--muted); display: block; margin-bottom: 4px; }
+    input, textarea {
+      width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+      border-radius: 6px; padding: 9px 10px; font-size: 16px;
+    }
+    textarea { resize: vertical; min-height: 70px; }
+    button {
+      background: var(--accent); color: #0d1117; font-weight: 600; border: none;
+      border-radius: 6px; padding: 11px; cursor: pointer; font-size: 0.95rem;
+    }
+    button:disabled { opacity: 0.5; cursor: wait; }
+    #inspector { margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 0.88rem; line-height: 1.5; }
+    .tag { display: inline-block; background: #21262d; color: var(--accent); padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; margin: 4px 4px 0 0; }
+    blockquote { border-left: 3px solid var(--border); padding-left: 10px; color: var(--muted); margin: 8px 0; font-style: italic; }
+    #canvas-wrap { flex: 1; position: relative; }
+    #legend {
+      position: absolute; bottom: 14px; right: 14px; background: rgba(22,27,34,0.9);
+      border: 1px solid var(--border); padding: 8px 12px; border-radius: 8px; font-size: 0.75rem; pointer-events: none;
+    }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+    @media (max-width: 768px) {
+      body { flex-direction: column; }
+      #sidebar { width: 100%; max-height: 52dvh; border-right: none; border-bottom: 1px solid var(--border); }
+      #canvas-wrap { height: 48dvh; }
+    }
+  </style>
+</head>
+<body>
+  <div id="sidebar">
+    <h1>
+      <span>ZETTELKASTEN AGENT</span>
+      <button style="padding:4px 8px;font-size:0.72rem;background:#21262d;color:var(--muted);" onclick="resetPasscode()">Key</button>
+    </h1>
+    <div>
+      <label>Book / Source & Page</label>
+      <input id="source" placeholder="e.g., How to Take Smart Notes, p. 42" />
+    </div>
+    <div>
+      <label>Quote (Optional)</label>
+      <textarea id="quote" placeholder="Paste passage..."></textarea>
+    </div>
+    <div>
+      <label>Your Thought / Synthesis *</label>
+      <textarea id="thought" placeholder="What is the core atomic idea?"></textarea>
+    </div>
+    <button id="submitBtn" onclick="submitNote()">Synthesize & Map Note</button>
+    <div id="inspector">
+      <div style="color: var(--muted)">Tap any node on the canvas to inspect its permanent note and quote.</div>
+    </div>
+  </div>
+
+  <div id="canvas-wrap">
+    <div id="graph"></div>
+    <div id="legend">
+      <div><span class="dot" style="background:#3fb950"></span>supports</div>
+      <div><span class="dot" style="background:#58a6ff"></span>extends</div>
+      <div><span class="dot" style="background:#f85149"></span>contradicts</div>
+      <div><span class="dot" style="background:#d2a8ff"></span>analogous_to</div>
+    </div>
+  </div>
+
+  <script>
+    const REL_COLORS = { supports: "#3fb950", extends: "#58a6ff", contradicts: "#f85149", analogous_to: "#d2a8ff" };
+    const wrap = document.getElementById("canvas-wrap");
+
+    function getPasscode() {
+      let code = localStorage.getItem("zk_passcode");
+      if (!code) {
+        code = prompt("Enter your Zettelkasten passcode:") || "";
+        localStorage.setItem("zk_passcode", code);
+      }
+      return code;
+    }
+
+    function resetPasscode() {
+      localStorage.removeItem("zk_passcode");
+      refreshGraph();
+    }
+
+    const Graph = ForceGraph()(document.getElementById("graph"))
+      .width(wrap.clientWidth)
+      .height(wrap.clientHeight)
+      .backgroundColor("#0d1117")
+      .nodeLabel(n => `${n.title}\n(${n.source})`)
+      .nodeColor(() => "#58a6ff")
+      .nodeRelSize(6)
+      .linkColor(l => REL_COLORS[l.relation] || "#8b949e")
+      .linkWidth(2)
+      .linkDirectionalArrowLength(5)
+      .linkDirectionalArrowRelPos(1)
+      .linkDirectionalParticles(2)
+      .linkDirectionalParticleWidth(2)
+      .linkLabel(l => `${l.relation.toUpperCase()}: ${l.reason}`)
+      .nodeCanvasObjectMode(() => "after")
+      .nodeCanvasObject((node, ctx, globalScale) => {
+        const fontSize = 12 / globalScale;
+        ctx.font = `${fontSize}px Sans-Serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillStyle = "#e6edf3";
+        ctx.fillText(node.title, node.x, node.y + 8);
+      })
+      .onNodeClick(node => {
+        const tags = (node.tags || []).map(t => `<span class="tag">#${t}</span>`).join("");
+        document.getElementById("inspector").innerHTML = `
+          <h3 style="margin-bottom:6px;color:#fff">${node.title}</h3>
+          <p>${node.permanent_note}</p>
+          ${node.quote ? `<blockquote>"${node.quote}"<br><small>— ${node.source}</small></blockquote>` : ""}
+          <div>${tags}</div>
+        `;
+      });
+
+    window.addEventListener("resize", () => Graph.width(wrap.clientWidth).height(wrap.clientHeight));
+
+    async function refreshGraph() {
+      const res = await fetch("/api/graph", { headers: { "x-passcode": getPasscode() } });
+      if (res.status === 401) {
+        alert("Wrong passcode.");
+        localStorage.removeItem("zk_passcode");
+        return;
+      }
+      Graph.graphData(await res.json());
+    }
+
+    async function submitNote() {
+      const thought = document.getElementById("thought").value.trim();
+      if (!thought) return alert("Please enter your thought or synthesis.");
+      const btn = document.getElementById("submitBtn");
+      btn.disabled = true;
+      btn.textContent = "Agent analyzing & saving to Drive...";
+
+      try {
+        const res = await fetch("/api/notes", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-passcode": getPasscode() },
+          body: JSON.stringify({
+            source: document.getElementById("source").value.trim() || "Unattributed",
+            quote: document.getElementById("quote").value.trim(),
+            thought
+          })
+        });
+        if (!res.ok) throw new Error("Failed to save note");
+        document.getElementById("quote").value = "";
+        document.getElementById("thought").value = "";
+        await refreshGraph();
+      } catch (err) {
+        alert(err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Synthesize & Map Note";
+      }
+    }
+
+    refreshGraph();
+  </script>
+</body>
+</html>
