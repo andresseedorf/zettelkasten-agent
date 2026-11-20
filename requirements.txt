@@ -1,0 +1,5 @@
+fastapi
+google-genai
+pydantic
+google-api-python-client
+google-auth
