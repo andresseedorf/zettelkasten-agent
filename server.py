@@ -102,7 +102,17 @@ def load_graph(drive, folder_id: str) -> dict:
     content = buf.getvalue().decode("utf-8-sig").strip()
     if not content:
         return {"nodes": [], "links": []}
-    return json.loads(content)
+
+    data = json.loads(content)
+    while isinstance(data, str):
+        data = json.loads(data)
+
+    if not isinstance(data, dict):
+        return {"nodes": [], "links": []}
+
+    data.setdefault("nodes", [])
+    data.setdefault("links", [])
+    return data
 
 
 def upload_text_to_drive(drive, folder_id: str, filename: str, content: str, mime_type: str):
