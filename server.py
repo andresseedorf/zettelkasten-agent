@@ -81,17 +81,28 @@ def find_drive_file(drive, folder_id: str, filename: str):
 
 
 def load_graph(drive, folder_id: str) -> dict:
-    file_id = find_drive_file(drive, folder_id, "graph.json")
-    if not file_id:
+    file_meta = find_drive_file(drive, folder_id, "graph.json")
+    if not file_meta:
         return {"nodes": [], "links": []}
-    request = drive.files().get_media(fileId=file_id)
+
+    file_id = file_meta["id"]
+    mime_type = file_meta.get("mimeType", "")
+
+    if mime_type == "application/vnd.google-apps.document":
+        request = drive.files().export_media(fileId=file_id, mimeType="text/plain")
+    else:
+        request = drive.files().get_media(fileId=file_id)
+
     buf = io.BytesIO()
     downloader = MediaIoBaseDownload(buf, request)
     done = False
     while not done:
         _, done = downloader.next_chunk()
-    content = buf.getvalue().decode("utf-8").strip()
-    return json.loads(content) if content else {"nodes": [], "links": []}
+
+    content = buf.getvalue().decode("utf-8-sig").strip()
+    if not content:
+        return {"nodes": [], "links": []}
+    return json.loads(content)
 
 
 def upload_text_to_drive(drive, folder_id: str, filename: str, content: str, mime_type: str):
@@ -174,7 +185,7 @@ CANDIDATE EXISTING NOTES:
 {json.dumps(candidates, indent=2)}
 """
         response = ai.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
