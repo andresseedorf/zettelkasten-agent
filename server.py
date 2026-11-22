@@ -55,6 +55,7 @@ class ZettelSynthesis(BaseModel):
     permanent_note: str = Field(description="Atomic idea rewritten in clear, standalone prose.")
     tags: List[str] = Field(description="2-4 lowercase topical tags without #.")
     connections: List[EdgeProposal] = Field(
+        default_factory=list,
         description="Meaningful conceptual links to candidate notes. Leave empty if unrelated."
     )
 
@@ -74,10 +75,13 @@ def verify_auth(x_passcode: str = Header(default="")):
 def find_drive_file(drive, folder_id: str, filename: str):
     q = f"name = '{filename}' and '{folder_id}' in parents and trashed = false"
     res = drive.files().list(
-        q=q, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True
+        q=q,
+        fields="files(id, name, mimeType)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
     ).execute()
     files = res.get("files", [])
-    return files[0]["id"] if files else None
+    return files[0] if files else None
 
 
 def load_graph(drive, folder_id: str) -> dict:
@@ -116,19 +120,53 @@ def load_graph(drive, folder_id: str) -> dict:
 
 
 def upload_text_to_drive(drive, folder_id: str, filename: str, content: str, mime_type: str):
-    media = MediaIoBaseUpload(io.BytesIO(content.encode("utf-8")), mimetype=mime_type, resumable=False)
-    existing_id = find_drive_file(drive, folder_id, filename)
-    if existing_id:
-        drive.files().update(fileId=existing_id, media_body=media, supportsAllDrives=True).execute()
+    existing = find_drive_file(drive, folder_id, filename)
+    if existing:
+        upload_mime = (
+            "text/plain"
+            if existing.get("mimeType") == "application/vnd.google-apps.document"
+            else mime_type
+        )
+        media = MediaIoBaseUpload(
+            io.BytesIO(content.encode("utf-8")), mimetype=upload_mime, resumable=False
+        )
+        drive.files().update(
+            fileId=existing["id"], media_body=media, supportsAllDrives=True
+        ).execute()
     else:
+        media = MediaIoBaseUpload(
+            io.BytesIO(content.encode("utf-8")), mimetype=mime_type, resumable=False
+        )
         meta = {"name": filename, "parents": [folder_id]}
-        drive.files().create(body=meta, media_body=media, fields="id", supportsAllDrives=True).execute()
+        drive.files().create(
+            body=meta, media_body=media, fields="id", supportsAllDrives=True
+        ).execute()
 
 
 def cosine_sim(a: List[float], b: List[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b))
     denom = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
     return dot / denom if denom else 0.0
+
+
+def parse_synthesis(response) -> ZettelSynthesis:
+    # 1. Prefer SDK-parsed Pydantic object if available
+    if getattr(response, "parsed", None) is not None:
+        parsed = response.parsed
+        if isinstance(parsed, ZettelSynthesis):
+            return parsed
+        if isinstance(parsed, dict):
+            return ZettelSynthesis.model_validate(parsed)
+
+    # 2. Fallback to raw text parsing (unwrapping double-encoded strings if needed)
+    raw = (getattr(response, "text", None) or "").strip()
+    if not raw:
+        raise RuntimeError("Gemini returned an empty response.")
+
+    obj = json.loads(raw)
+    while isinstance(obj, str):
+        obj = json.loads(obj)
+    return ZettelSynthesis.model_validate(obj)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -157,10 +195,16 @@ def read_graph(x_passcode: str = Header(default="")):
     try:
         _, drive, folder_id, _ = get_clients()
         graph = load_graph(drive, folder_id)
-        clean_nodes = [{k: v for k, v in n.items() if k != "embedding"} for n in graph["nodes"]]
+        clean_nodes = [
+            {k: v for k, v in n.items() if k != "embedding"}
+            for n in graph["nodes"]
+            if isinstance(n, dict)
+        ]
         return {"nodes": clean_nodes, "links": graph["links"]}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        tb = traceback.extract_tb(e.__traceback__)
+        line_info = f" (line {tb[-1].lineno})" if tb else ""
+        raise HTTPException(status_code=500, detail=f"{e}{line_info}")
 
 
 @app.post("/api/notes")
@@ -172,18 +216,24 @@ def add_note(payload: NoteInput, x_passcode: str = Header(default="")):
         raw_text = f"Quote: {payload.quote}\nSource: {payload.source}\nThought: {payload.thought}"
 
         emb_res = ai.models.embed_content(model="gemini-embedding-001", contents=raw_text)
-        new_emb = emb_res.embeddings[0].values
+        new_emb = list(emb_res.embeddings[0].values)
 
         scored = [
             (cosine_sim(new_emb, n["embedding"]), n)
             for n in graph["nodes"]
-            if "embedding" in n
+            if isinstance(n, dict) and "embedding" in n
         ]
         scored.sort(key=lambda x: x[0], reverse=True)
         candidates = [
             {"id": n["id"], "title": n["title"], "permanent_note": n["permanent_note"]}
             for _, n in scored[:6]
         ]
+
+        candidates_block = (
+            json.dumps(candidates, indent=2)
+            if candidates
+            else "None yet (this is the first note in the Zettelkasten, so return an empty connections list)."
+        )
 
         prompt = f"""You are a Zettelkasten research assistant.
 Distill the user's input into ONE atomic Permanent Note, and evaluate whether it meaningfully connects to any of the candidate existing notes.
@@ -192,7 +242,7 @@ NEW INPUT:
 {raw_text}
 
 CANDIDATE EXISTING NOTES:
-{json.dumps(candidates, indent=2)}
+{candidates_block}
 """
         response = ai.models.generate_content(
             model="gemini-3.8-flash",
@@ -203,7 +253,7 @@ CANDIDATE EXISTING NOTES:
                 temperature=0.2,
             ),
         )
-        synthesis = ZettelSynthesis.model_validate_json(response.text)
+        synthesis = parse_synthesis(response)
 
         note_id = uuid.uuid4().hex[:6]
         new_node = {
@@ -218,7 +268,7 @@ CANDIDATE EXISTING NOTES:
         }
         graph["nodes"].append(new_node)
 
-        valid_ids = {n["id"] for n in graph["nodes"]}
+        valid_ids = {n["id"] for n in graph["nodes"] if isinstance(n, dict)}
         new_links = []
         for conn in synthesis.connections:
             if conn.target_id in valid_ids and conn.target_id != note_id:
@@ -233,10 +283,9 @@ CANDIDATE EXISTING NOTES:
 
         upload_text_to_drive(drive, folder_id, "graph.json", json.dumps(graph, indent=2), "application/json")
 
-        # Best-effort Markdown export (won't block canvas if service account lacks file-creation quota)
         md_warning = None
         try:
-            id_to_title = {n["id"]: n["title"] for n in graph["nodes"]}
+            id_to_title = {n["id"]: n["title"] for n in graph["nodes"] if isinstance(n, dict)}
             slug = "".join(c if c.isalnum() or c in " -_" else "" for c in new_node["title"]).strip().replace(" ", "_")
             filename = f"{new_node['id']}_{slug}.md"
             tag_line = " ".join(f"#{t}" for t in new_node["tags"])
@@ -269,4 +318,6 @@ CANDIDATE EXISTING NOTES:
         }
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        tb = traceback.extract_tb(e.__traceback__)
+        line_info = f" (line {tb[-1].lineno})" if tb else ""
+        raise HTTPException(status_code=500, detail=f"{e}{line_info}")
