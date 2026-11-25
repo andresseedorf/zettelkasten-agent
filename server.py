@@ -1,338 +1,353 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Zettelkasten Canvas</title>
-  <script src="https://unpkg.com/force-graph"></script>
-  <style>
-    :root {
-      --bg: #0d1117; --panel: #161b22; --border: #30363d;
-      --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
-    body { background: var(--bg); color: var(--text); display: flex; height: 100dvh; width: 100vw; overflow: hidden; }
+import os
+import io
+import json
+import math
+import time
+import uuid
+import traceback
+from datetime import datetime
+from pathlib import Path
+from typing import List, Literal
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel, Field
+from google import genai
+from google.genai import types
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
-    /* Lock Screen Overlay */
-    #lockScreen {
-      position: fixed; inset: 0; background: var(--bg); z-index: 999;
-      display: flex; align-items: center; justify-content: center; padding: 20px;
-    }
-    #lockCard {
-      width: 100%; max-width: 340px; background: var(--panel); border: 1px solid var(--border);
-      border-radius: 10px; padding: 24px; display: flex; flex-direction: column; gap: 14px;
-    }
-    #lockCard h2 { font-size: 1rem; color: var(--accent); letter-spacing: 0.05em; }
-    #lockError { color: #f85149; font-size: 0.82rem; display: none; }
+app = FastAPI()
+BASE_DIR = Path(__file__).resolve().parent
 
-    #sidebar {
-      width: 380px;
-      min-width: 150px;
-      max-width: 80vw;
-      flex-shrink: 0;
-      background: var(--panel);
-      padding: 18px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      z-index: 10;
-      overflow-y: auto;
-    }
-    #resizer {
-      width: 6px;
-      background: var(--border);
-      cursor: col-resize;
-      flex-shrink: 0;
-      z-index: 20;
-      transition: background 0.15s;
-      touch-action: none;
-    }
-    #resizer:hover, #resizer.dragging {
-      background: var(--accent);
-    }
-    h1 { font-size: 1.05rem; letter-spacing: 0.04em; color: var(--accent); display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-    label { font-size: 0.78rem; color: var(--muted); display: block; margin-bottom: 4px; }
-    input, textarea {
-      width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
-      border-radius: 6px; padding: 9px 10px; font-size: 16px;
-    }
-    textarea { resize: vertical; min-height: 70px; }
-    #thought { min-height: 140px; }
-    button {
-      background: var(--accent); color: #0d1117; font-weight: 600; border: none;
-      border-radius: 6px; padding: 11px; cursor: pointer; font-size: 0.95rem;
-    }
-    button:disabled { opacity: 0.5; cursor: wait; }
-    #inspector { margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 0.88rem; line-height: 1.5; }
-    .tag { display: inline-block; background: #21262d; color: var(--accent); padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; margin: 4px 4px 0 0; }
-    blockquote { border-left: 3px solid var(--border); padding-left: 10px; color: var(--muted); margin: 8px 0; font-style: italic; }
-    #canvas-wrap { flex: 1; min-width: 0; min-height: 0; position: relative; }
-    #legend {
-      position: absolute; bottom: 14px; right: 14px; background: rgba(22,27,34,0.9);
-      border: 1px solid var(--border); padding: 8px 12px; border-radius: 8px; font-size: 0.75rem; pointer-events: none;
-    }
-    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+# Active Gemini 3 fallback chain to handle temporary 503 high-demand spikes
+FALLBACK_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3.8-flash-lite",
+    "gemini-3.8-pro",
+]
 
-    @media (max-width: 768px) {
-      body { flex-direction: column; }
-      #sidebar {
-        width: 100% !important;
-        min-width: 100% !important;
-        max-width: 100% !important;
-        height: 56dvh;
-        min-height: 150px;
-        max-height: 85dvh;
-      }
-      #resizer {
-        width: 100%;
-        height: 8px;
-        cursor: row-resize;
-      }
-      #canvas-wrap { flex: 1; width: 100%; }
-    }
-  </style>
-</head>
-<body>
-  <div id="lockScreen">
-    <form id="lockCard" action="/api/verify" method="post">
-      <h2>ZETTELKASTEN VAULT</h2>
-      <p style="font-size:0.84rem;color:var(--muted);">Enter your personal passcode to unlock your canvas.</p>
-      <!-- Hidden username field enables browser Password Manager save & autofill -->
-      <input type="text" name="username" value="zettelkasten-owner" autocomplete="username" style="position:absolute;opacity:0;height:0;width:0;pointer-events:none;" tabindex="-1" />
-      <input id="passInput" name="password" type="password" placeholder="Passcode" autocomplete="current-password" required />
-      <div id="lockError">Incorrect passcode. Try again.</div>
-      <button id="unlockBtn" type="submit">Unlock Canvas</button>
-    </form>
-  </div>
 
-  <div id="sidebar">
-    <h1>
-      <span>ZETTELKASTEN AGENT</span>
-      <button id="lockBtn" type="button" style="padding:4px 8px;font-size:0.72rem;background:#21262d;color:var(--muted);">Lock</button>
-    </h1>
-    <div>
-      <label>Book / Source & Page</label>
-      <input id="source" placeholder="e.g., How to Take Smart Notes, p. 42" />
-    </div>
-    <div>
-      <label>Quote (Optional)</label>
-      <textarea id="quote" placeholder="Paste passage..."></textarea>
-    </div>
-    <div>
-      <label>Your Thought / Synthesis *</label>
-      <textarea id="thought" placeholder="What is the core atomic idea?"></textarea>
-    </div>
-    <button id="submitBtn" type="button">Synthesize & Map Note</button>
-    <div id="inspector">
-      <div style="color: var(--muted)">Tap any node on the canvas to inspect its permanent note and quote.</div>
-    </div>
-  </div>
+def get_clients():
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    folder_id = os.environ.get("DRIVE_FOLDER_ID", "").strip()
+    raw_sa = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 
-  <div id="resizer" title="Drag to resize sidebar"></div>
+    if not api_key:
+        raise RuntimeError("Missing GEMINI_API_KEY in Vercel Environment Variables.")
+    if not folder_id:
+        raise RuntimeError("Missing DRIVE_FOLDER_ID in Vercel Environment Variables.")
+    if not raw_sa:
+        raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_JSON in Vercel Environment Variables.")
 
-  <div id="canvas-wrap">
-    <div id="graph"></div>
-    <div id="legend">
-      <div><span class="dot" style="background:#3fb950"></span>supports</div>
-      <div><span class="dot" style="background:#58a6ff"></span>extends</div>
-      <div><span class="dot" style="background:#f85149"></span>contradicts</div>
-      <div><span class="dot" style="background:#d2a8ff"></span>analogous_to</div>
-    </div>
-  </div>
+    creds_info = json.loads(raw_sa, strict=False)
+    if "private_key" in creds_info:
+        creds_info["private_key"] = creds_info["private_key"].replace("\\n", "\n")
 
-  <script>
-    const REL_COLORS = {
-      supports: "#3fb950",
-      extends: "#58a6ff",
-      contradicts: "#f85149",
-      analogous_to: "#d2a8ff"
-    };
+    creds = service_account.Credentials.from_service_account_info(
+        creds_info, scopes=["https://www.googleapis.com/auth/drive"]
+    )
+    drive = build("drive", "v3", credentials=creds)
+    ai = genai.Client(api_key=api_key)
+    return ai, drive, folder_id, creds_info.get("client_email", "")
 
-    const lockScreen = document.getElementById("lockScreen");
-    const lockCard = document.getElementById("lockCard");
-    const passInput = document.getElementById("passInput");
-    const lockError = document.getElementById("lockError");
-    const unlockBtn = document.getElementById("unlockBtn");
 
-    const sidebar = document.getElementById("sidebar");
-    const resizer = document.getElementById("resizer");
-    const wrap = document.getElementById("canvas-wrap");
-    const submitBtn = document.getElementById("submitBtn");
-    const lockBtn = document.getElementById("lockBtn");
+class EdgeProposal(BaseModel):
+    target_id: str
+    relation: Literal["supports", "contradicts", "extends", "analogous_to"]
+    reason: str = Field(description="One concise sentence explaining the conceptual link.")
 
-    // Clear any legacy localStorage token so each new tab prompts for login
-    localStorage.removeItem("zk_passcode");
 
-    function getPasscode() {
-      return sessionStorage.getItem("zk_passcode") || "";
-    }
+class ZettelSynthesis(BaseModel):
+    title: str = Field(description="Short, declarative concept title (3-7 words).")
+    permanent_note: str = Field(description="Atomic idea rewritten in clear, standalone prose.")
+    tags: List[str] = Field(description="2-4 lowercase topical tags without #.")
+    connections: List[EdgeProposal] = Field(
+        default_factory=list,
+        description="Meaningful conceptual links to candidate notes. Leave empty if unrelated."
+    )
 
-    const Graph = ForceGraph()(document.getElementById("graph"))
-      .width(wrap.clientWidth)
-      .height(wrap.clientHeight)
-      .backgroundColor("#0d1117")
-      .nodeLabel(n => `${n.title}\n(${n.source})`)
-      .nodeColor(() => "#58a6ff")
-      .nodeRelSize(6)
-      .linkColor(l => REL_COLORS[l.relation] || "#8b949e")
-      .linkWidth(2)
-      .linkDirectionalArrowLength(5)
-      .linkDirectionalArrowRelPos(1)
-      .linkDirectionalParticles(2)
-      .linkDirectionalParticleWidth(2)
-      .linkLabel(l => `${l.relation.toUpperCase()}: ${l.reason}`)
-      .nodeCanvasObjectMode(() => "after")
-      .nodeCanvasObject((node, ctx, globalScale) => {
-        const fontSize = 12 / globalScale;
-        ctx.font = `${fontSize}px Sans-Serif`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "top";
-        ctx.fillStyle = "#e6edf3";
-        ctx.fillText(node.title, node.x, node.y + 8);
-      })
-      .onNodeClick(node => {
-        const tags = (node.tags || []).map(t => `<span class="tag">#${t}</span>`).join("");
-        document.getElementById("inspector").innerHTML = `
-          <h3 style="margin-bottom:6px;color:#fff">${node.title}</h3>
-          <p>${node.permanent_note}</p>
-          ${node.quote ? `<blockquote>"${node.quote}"<br><small>— ${node.source}</small></blockquote>` : ""}
-          <div>${tags}</div>
-        `;
-      });
 
-    function syncCanvasSize() {
-      Graph.width(wrap.clientWidth).height(wrap.clientHeight);
-    }
+class NoteInput(BaseModel):
+    quote: str = ""
+    thought: str
+    source: str = "Unattributed"
 
-    window.addEventListener("resize", syncCanvasSize);
 
-    let isDragging = false;
+def verify_auth(x_passcode: str = Header(default="")):
+    expected = os.environ.get("APP_PASSWORD", "").strip()
+    if expected and x_passcode.strip() != expected:
+        raise HTTPException(status_code=401, detail="Invalid passcode.")
 
-    resizer.addEventListener("pointerdown", (e) => {
-      isDragging = true;
-      resizer.classList.add("dragging");
-      resizer.setPointerCapture(e.pointerId);
-      document.body.style.userSelect = "none";
-    });
 
-    resizer.addEventListener("pointermove", (e) => {
-      if (!isDragging) return;
-      const isMobile = window.innerWidth <= 768;
+def find_drive_file(drive, folder_id: str, filename: str):
+    q = f"name = '{filename}' and '{folder_id}' in parents and trashed = false"
+    res = drive.files().list(
+        q=q,
+        fields="files(id, name, mimeType)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ).execute()
+    files = res.get("files", [])
+    return files[0] if files else None
 
-      if (isMobile) {
-        sidebar.style.minHeight = "100px";
-        const newHeight = Math.min(Math.max(100, e.clientY), window.innerHeight - 120);
-        sidebar.style.height = `${newHeight}px`;
-      } else {
-        sidebar.style.minWidth = "100px";
-        const newWidth = Math.min(Math.max(100, e.clientX), window.innerWidth - 150);
-        sidebar.style.width = `${newWidth}px`;
-      }
-      syncCanvasSize();
-    });
 
-    function stopDragging(e) {
-      if (!isDragging) return;
-      isDragging = false;
-      resizer.classList.remove("dragging");
-      document.body.style.userSelect = "";
-      if (e && e.pointerId) resizer.releasePointerCapture(e.pointerId);
-      syncCanvasSize();
-    }
+def load_graph(drive, folder_id: str) -> dict:
+    file_meta = find_drive_file(drive, folder_id, "graph.json")
+    if not file_meta:
+        return {"nodes": [], "links": []}
 
-    resizer.addEventListener("pointerup", stopDragging);
-    resizer.addEventListener("pointercancel", stopDragging);
+    file_id = file_meta["id"]
+    mime_type = file_meta.get("mimeType", "")
 
-    async function tryUnlock(code) {
-      unlockBtn.disabled = true;
-      lockError.style.display = "none";
-      try {
-        const res = await fetch("/api/verify", {
-          method: "POST",
-          headers: { "x-passcode": code }
-        });
-        if (res.status === 401) {
-          sessionStorage.removeItem("zk_passcode");
-          lockScreen.style.display = "flex";
-          lockError.style.display = "block";
-          return false;
+    if mime_type == "application/vnd.google-apps.document":
+        request = drive.files().export_media(fileId=file_id, mimeType="text/plain")
+    else:
+        request = drive.files().get_media(fileId=file_id)
+
+    buf = io.BytesIO()
+    downloader = MediaIoBaseDownload(buf, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+
+    content = buf.getvalue().decode("utf-8-sig").strip()
+    if not content:
+        return {"nodes": [], "links": []}
+
+    data = json.loads(content)
+    while isinstance(data, str):
+        data = json.loads(data)
+
+    if not isinstance(data, dict):
+        return {"nodes": [], "links": []}
+
+    data.setdefault("nodes", [])
+    data.setdefault("links", [])
+    return data
+
+
+def upload_text_to_drive(drive, folder_id: str, filename: str, content: str, mime_type: str):
+    existing = find_drive_file(drive, folder_id, filename)
+    if existing:
+        upload_mime = (
+            "text/plain"
+            if existing.get("mimeType") == "application/vnd.google-apps.document"
+            else mime_type
+        )
+        media = MediaIoBaseUpload(
+            io.BytesIO(content.encode("utf-8")), mimetype=upload_mime, resumable=False
+        )
+        drive.files().update(
+            fileId=existing["id"], media_body=media, supportsAllDrives=True
+        ).execute()
+    else:
+        media = MediaIoBaseUpload(
+            io.BytesIO(content.encode("utf-8")), mimetype=mime_type, resumable=False
+        )
+        meta = {"name": filename, "parents": [folder_id]}
+        drive.files().create(
+            body=meta, media_body=media, fields="id", supportsAllDrives=True
+        ).execute()
+
+
+def cosine_sim(a: List[float], b: List[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    denom = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
+    return dot / denom if denom else 0.0
+
+
+def parse_synthesis(response) -> ZettelSynthesis:
+    if getattr(response, "parsed", None) is not None:
+        parsed = response.parsed
+        if isinstance(parsed, ZettelSynthesis):
+            return parsed
+        if isinstance(parsed, dict):
+            return ZettelSynthesis.model_validate(parsed)
+
+    raw = (getattr(response, "text", None) or "").strip()
+    if not raw:
+        raise RuntimeError("Gemini returned an empty response.")
+
+    obj = json.loads(raw)
+    while isinstance(obj, str):
+        obj = json.loads(obj)
+    return ZettelSynthesis.model_validate(obj)
+
+
+def generate_with_fallback(ai, prompt: str) -> tuple[ZettelSynthesis, str]:
+    last_err = None
+    for model_name in FALLBACK_MODELS:
+        for attempt in range(3):
+            try:
+                response = ai.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=ZettelSynthesis,
+                        temperature=0.2,
+                    ),
+                )
+                return parse_synthesis(response), model_name
+            except Exception as e:
+                last_err = e
+                err_str = str(e)
+                # Exponential backoff on transient 503/429 before failing over to next Gemini 3 model
+                if any(code in err_str for code in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED")) and attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                break
+    raise RuntimeError(f"All Gemini 3 models busy. Last error: {last_err}")
+
+
+@app.get("/", response_class=HTMLResponse)
+def serve_ui():
+    return (BASE_DIR / "index.html").read_text(encoding="utf-8")
+
+
+@app.get("/api/health")
+def health_check():
+    try:
+        _, drive, folder_id, sa_email = get_clients()
+        folder = drive.files().get(fileId=folder_id, fields="id, name, capabilities").execute()
+        return {
+            "status": "ok",
+            "service_account": sa_email,
+            "drive_folder_name": folder.get("name"),
+            "can_edit_folder": folder.get("capabilities", {}).get("canAddChildren"),
         }
-        sessionStorage.setItem("zk_passcode", code);
-        lockScreen.style.display = "none";
-        syncCanvasSize();
-        await refreshGraph();
-        return true;
-      } finally {
-        unlockBtn.disabled = false;
-      }
-    }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"status": "error", "detail": str(e)})
 
-    lockCard.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      await tryUnlock(passInput.value);
-    });
 
-    lockBtn.addEventListener("click", () => {
-      sessionStorage.removeItem("zk_passcode");
-      lockError.style.display = "none";
-      lockScreen.style.display = "flex";
-      passInput.focus();
-    });
+@app.api_route("/api/verify", methods=["GET", "POST"])
+def check_passcode(x_passcode: str = Header(default="")):
+    verify_auth(x_passcode)
+    return {"status": "unlocked"}
 
-    async function refreshGraph() {
-      const res = await fetch("/api/graph", { headers: { "x-passcode": getPasscode() } });
-      if (res.status === 401) {
-        sessionStorage.removeItem("zk_passcode");
-        lockScreen.style.display = "flex";
-        return;
-      }
-      const data = await res.json();
-      Graph.graphData(data);
-    }
 
-    async function submitNote() {
-      const thought = document.getElementById("thought").value.trim();
-      if (!thought) {
-        alert("Please enter your thought or synthesis.");
-        return;
-      }
-      submitBtn.disabled = true;
-      submitBtn.textContent = "Agent analyzing & saving to Drive...";
+@app.get("/api/graph")
+def read_graph(x_passcode: str = Header(default="")):
+    verify_auth(x_passcode)
+    try:
+        _, drive, folder_id, _ = get_clients()
+        graph = load_graph(drive, folder_id)
+        clean_nodes = [
+            {k: v for k, v in n.items() if k != "embedding"}
+            for n in graph["nodes"]
+            if isinstance(n, dict)
+        ]
+        return {"nodes": clean_nodes, "links": graph["links"]}
+    except Exception as e:
+        tb = traceback.extract_tb(e.__traceback__)
+        line_info = f" (line {tb[-1].lineno})" if tb else ""
+        raise HTTPException(status_code=500, detail=f"{e}{line_info}")
 
-      try {
-        const res = await fetch("/api/notes", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-passcode": getPasscode()
-          },
-          body: JSON.stringify({
-            source: document.getElementById("source").value.trim() || "Unattributed",
-            quote: document.getElementById("quote").value.trim(),
-            thought: thought
-          })
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.detail || "Failed to save note");
+
+@app.post("/api/notes")
+def add_note(payload: NoteInput, x_passcode: str = Header(default="")):
+    verify_auth(x_passcode)
+    try:
+        ai, drive, folder_id, _ = get_clients()
+        graph = load_graph(drive, folder_id)
+        raw_text = f"Quote: {payload.quote}\nSource: {payload.source}\nThought: {payload.thought}"
+
+        emb_res = ai.models.embed_content(model="gemini-embedding-001", contents=raw_text)
+        new_emb = list(emb_res.embeddings[0].values)
+
+        scored = [
+            (cosine_sim(new_emb, n["embedding"]), n)
+            for n in graph["nodes"]
+            if isinstance(n, dict) and "embedding" in n
+        ]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        candidates = [
+            {"id": n["id"], "title": n["title"], "permanent_note": n["permanent_note"]}
+            for _, n in scored[:6]
+        ]
+
+        candidates_block = (
+            json.dumps(candidates, indent=2)
+            if candidates
+            else "None yet (this is the first note in the Zettelkasten, so return an empty connections list)."
+        )
+
+        prompt = f"""You are a Zettelkasten research assistant.
+Distill the user's input into ONE atomic Permanent Note, and evaluate whether it meaningfully connects to any of the candidate existing notes.
+
+NEW INPUT:
+{raw_text}
+
+CANDIDATE EXISTING NOTES:
+{candidates_block}
+"""
+        synthesis, used_model = generate_with_fallback(ai, prompt)
+
+        note_id = uuid.uuid4().hex[:6]
+        new_node = {
+            "id": note_id,
+            "title": synthesis.title,
+            "permanent_note": synthesis.permanent_note,
+            "quote": payload.quote,
+            "source": payload.source,
+            "tags": synthesis.tags,
+            "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "embedding": new_emb,
         }
-        document.getElementById("quote").value = "";
-        document.getElementById("thought").value = "";
-        await refreshGraph();
-      } catch (err) {
-        alert("Error: " + err.message);
-      } finally {
-        submitBtn.disabled = false;
-        submitBtn.textContent = "Synthesize & Map Note";
-      }
-    }
+        graph["nodes"].append(new_node)
 
-    submitBtn.addEventListener("click", submitNote);
+        valid_ids = {n["id"] for n in graph["nodes"] if isinstance(n, dict)}
+        new_links = []
+        for conn in synthesis.connections:
+            if conn.target_id in valid_ids and conn.target_id != note_id:
+                edge = {
+                    "source": note_id,
+                    "target": conn.target_id,
+                    "relation": conn.relation,
+                    "reason": conn.reason,
+                }
+                graph["links"].append(edge)
+                new_links.append(edge)
 
-    // Always show login gate on fresh tab load; browser autofills saved password
-    window.addEventListener("DOMContentLoaded", () => {
-      passInput.focus();
-    });
-  </script>
-</body>
-</html>
+        upload_text_to_drive(drive, folder_id, "graph.json", json.dumps(graph, indent=2), "application/json")
+
+        md_warning = None
+        try:
+            id_to_title = {n["id"]: n["title"] for n in graph["nodes"] if isinstance(n, dict)}
+            slug = "".join(c if c.isalnum() or c in " -_" else "" for c in new_node["title"]).strip().replace(" ", "_")
+            filename = f"{new_node['id']}_{slug}.md"
+            tag_line = " ".join(f"#{t}" for t in new_node["tags"])
+            link_lines = [
+                f"- **{lk['relation']}** [[{id_to_title.get(lk['target'], lk['target'])}]]: {lk['reason']}"
+                for lk in new_links
+            ]
+            md = f"""# {new_node['title']}
+**ID:** `{new_node['id']}` | **Created:** {new_node['created']} | **Tags:** {tag_line}
+
+## Permanent Note
+{new_node['permanent_note']}
+
+## Literature Note
+> "{new_node['quote']}"
+> — *{new_node['source']}*
+
+## Connections
+{chr(10).join(link_lines) if link_lines else "_No links yet._"}
+"""
+            upload_text_to_drive(drive, folder_id, filename, md, "text/markdown")
+        except Exception as md_err:
+            md_warning = str(md_err)
+
+        return {
+            "status": "ok",
+            "model_used": used_model,
+            "node": {k: v for k, v in new_node.items() if k != "embedding"},
+            "links": new_links,
+            "md_warning": md_warning,
+        }
+    except Exception as e:
+        traceback.print_exc()
+        tb = traceback.extract_tb(e.__traceback__)
+        line_info = f" (line {tb[-1].lineno})" if tb else ""
+        raise HTTPException(status_code=500, detail=f"{e}{line_info}")
