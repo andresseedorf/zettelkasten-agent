@@ -12,6 +12,19 @@
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
     body { background: var(--bg); color: var(--text); display: flex; height: 100dvh; width: 100vw; overflow: hidden; }
+
+    /* Lock Screen Overlay */
+    #lockScreen {
+      position: fixed; inset: 0; background: var(--bg); z-index: 999;
+      display: flex; align-items: center; justify-content: center; padding: 20px;
+    }
+    #lockCard {
+      width: 100%; max-width: 340px; background: var(--panel); border: 1px solid var(--border);
+      border-radius: 10px; padding: 24px; display: flex; flex-direction: column; gap: 14px;
+    }
+    #lockCard h2 { font-size: 1rem; color: var(--accent); letter-spacing: 0.05em; }
+    #lockError { color: #f85149; font-size: 0.82rem; display: none; }
+
     #sidebar {
       width: 380px;
       min-width: 150px;
@@ -80,10 +93,22 @@
   </style>
 </head>
 <body>
+  <div id="lockScreen">
+    <form id="lockCard" action="/api/verify" method="post">
+      <h2>ZETTELKASTEN VAULT</h2>
+      <p style="font-size:0.84rem;color:var(--muted);">Enter your personal passcode to unlock your canvas.</p>
+      <!-- Hidden username field enables browser Password Manager save & autofill -->
+      <input type="text" name="username" value="zettelkasten-owner" autocomplete="username" style="position:absolute;opacity:0;height:0;width:0;pointer-events:none;" tabindex="-1" />
+      <input id="passInput" name="password" type="password" placeholder="Passcode" autocomplete="current-password" required />
+      <div id="lockError">Incorrect passcode. Try again.</div>
+      <button id="unlockBtn" type="submit">Unlock Canvas</button>
+    </form>
+  </div>
+
   <div id="sidebar">
     <h1>
       <span>ZETTELKASTEN AGENT</span>
-      <button id="keyBtn" type="button" style="padding:4px 8px;font-size:0.72rem;background:#21262d;color:var(--muted);">Key</button>
+      <button id="lockBtn" type="button" style="padding:4px 8px;font-size:0.72rem;background:#21262d;color:var(--muted);">Lock</button>
     </h1>
     <div>
       <label>Book / Source & Page</label>
@@ -123,19 +148,23 @@
       analogous_to: "#d2a8ff"
     };
 
+    const lockScreen = document.getElementById("lockScreen");
+    const lockCard = document.getElementById("lockCard");
+    const passInput = document.getElementById("passInput");
+    const lockError = document.getElementById("lockError");
+    const unlockBtn = document.getElementById("unlockBtn");
+
     const sidebar = document.getElementById("sidebar");
     const resizer = document.getElementById("resizer");
     const wrap = document.getElementById("canvas-wrap");
     const submitBtn = document.getElementById("submitBtn");
-    const keyBtn = document.getElementById("keyBtn");
+    const lockBtn = document.getElementById("lockBtn");
+
+    // Clear any legacy localStorage token so each new tab prompts for login
+    localStorage.removeItem("zk_passcode");
 
     function getPasscode() {
-      let code = localStorage.getItem("zk_passcode");
-      if (!code) {
-        code = prompt("Enter your Zettelkasten passcode:") || "";
-        localStorage.setItem("zk_passcode", code);
-      }
-      return code;
+      return sessionStorage.getItem("zk_passcode") || "";
     }
 
     const Graph = ForceGraph()(document.getElementById("graph"))
@@ -214,11 +243,47 @@
     resizer.addEventListener("pointerup", stopDragging);
     resizer.addEventListener("pointercancel", stopDragging);
 
+    async function tryUnlock(code) {
+      unlockBtn.disabled = true;
+      lockError.style.display = "none";
+      try {
+        const res = await fetch("/api/verify", {
+          method: "POST",
+          headers: { "x-passcode": code }
+        });
+        if (res.status === 401) {
+          sessionStorage.removeItem("zk_passcode");
+          lockScreen.style.display = "flex";
+          lockError.style.display = "block";
+          return false;
+        }
+        sessionStorage.setItem("zk_passcode", code);
+        lockScreen.style.display = "none";
+        syncCanvasSize();
+        await refreshGraph();
+        return true;
+      } finally {
+        unlockBtn.disabled = false;
+      }
+    }
+
+    lockCard.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      await tryUnlock(passInput.value);
+    });
+
+    lockBtn.addEventListener("click", () => {
+      sessionStorage.removeItem("zk_passcode");
+      lockError.style.display = "none";
+      lockScreen.style.display = "flex";
+      passInput.focus();
+    });
+
     async function refreshGraph() {
       const res = await fetch("/api/graph", { headers: { "x-passcode": getPasscode() } });
       if (res.status === 401) {
-        alert("Wrong passcode.");
-        localStorage.removeItem("zk_passcode");
+        sessionStorage.removeItem("zk_passcode");
+        lockScreen.style.display = "flex";
         return;
       }
       const data = await res.json();
@@ -262,14 +327,12 @@
       }
     }
 
-    keyBtn.addEventListener("click", () => {
-      localStorage.removeItem("zk_passcode");
-      refreshGraph();
-    });
-
     submitBtn.addEventListener("click", submitNote);
 
-    refreshGraph();
+    // Always show login gate on fresh tab load; browser autofills saved password
+    window.addEventListener("DOMContentLoaded", () => {
+      passInput.focus();
+    });
   </script>
 </body>
 </html>
