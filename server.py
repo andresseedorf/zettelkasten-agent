@@ -23,8 +23,7 @@ BASE_DIR = Path(__file__).resolve().parent
 # Active Gemini 3 fallback chain to handle temporary 503 high-demand spikes
 FALLBACK_MODELS = [
     "gemini-3.8-flash",
-    "gemini-3.8-flash-lite",
-    "gemini-3.8-pro",
+    "gemini-2.5-pro",
 ]
 
 
@@ -178,27 +177,22 @@ def parse_synthesis(response) -> ZettelSynthesis:
 def generate_with_fallback(ai, prompt: str) -> tuple[ZettelSynthesis, str]:
     last_err = None
     for model_name in FALLBACK_MODELS:
-        for attempt in range(3):
-            try:
-                response = ai.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=ZettelSynthesis,
-                        temperature=0.2,
-                    ),
-                )
-                return parse_synthesis(response), model_name
-            except Exception as e:
-                last_err = e
-                err_str = str(e)
-                # Exponential backoff on transient 503/429 before failing over to next Gemini 3 model
-                if any(code in err_str for code in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED")) and attempt < 2:
-                    time.sleep(1.5 * (attempt + 1))
-                    continue
-                break
-    raise RuntimeError(f"All Gemini 3 models busy. Last error: {last_err}")
+        try:
+            response = ai.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=ZettelSynthesis,
+                    temperature=0.2,
+                    http_options=types.HttpOptions(timeout=7000),  # 7s cap so Vercel never 504s
+                ),
+            )
+            return parse_synthesis(response), model_name
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"Model call failed: {last_err}")
 
 
 @app.get("/", response_class=HTMLResponse)
